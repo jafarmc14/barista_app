@@ -7,13 +7,22 @@ void main() {
   runApp(const MyApp());
 }
 
+Future<Map<String, String>> getHeaders() async {
+  final prefs = await SharedPreferences.getInstance();
+  final storedToken = prefs.getString('auth_token') ?? '';
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer $storedToken',
+  };
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'The Focused Editorial',
+      title: 'Pavilijon Coffee',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         // Menggunakan warna biru selaras dengan HTML
@@ -41,9 +50,9 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _login() async {
     final pin = _pinController.text.trim();
     if (pin.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('PIN tidak boleh kosong')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('PIN tidak boleh kosong')));
       return;
     }
 
@@ -60,11 +69,17 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        final token = data['token']; // Asumsi response JSON punya field token
+        final token = data['token'];
 
         if (token != null) {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('auth_token', token);
+
+          final user = data['user'];
+          if (user != null && user['name'] != null) {
+            await prefs.setString('user_name', user['name'].toString());
+          }
+          await prefs.setString('user_pin', pin);
 
           if (mounted) {
             Navigator.pushReplacement(
@@ -91,9 +106,9 @@ class _LoginScreenState extends State<LoginScreen> {
 
   void _showError(String message) {
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -119,7 +134,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 children: [
                   // --- Judul ---
                   const Text(
-                    'The Focused Editorial',
+                    'Pavilijon Coffee',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 34,
@@ -132,7 +147,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                   // --- Sub-judul ---
                   const Text(
-                    'Start focusing.',
+                    'Pav app',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 24,
@@ -268,14 +283,456 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  List<Map<String, dynamic>> _todoList = [];
+  final List<Map<String, dynamic>> _doneList = [];
+  bool _isLoading = false;
+  bool _isSyncingDone = false;
+  String? _userName;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserName();
+    _fetchOrders();
+  }
+
+  Future<void> _loadUserName() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _userName = prefs.getString('user_name');
+      });
+    }
+  }
+
+  Future<void> _fetchOrders() async {
+    setState(() {
+      _isLoading = true;
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token') ?? '';
+      final pin = prefs.getString('user_pin') ?? '';
+
+      // Menggunakan http.Request agar bisa mengirim body JSON pada method GET
+      final request = http.Request(
+        'GET',
+        Uri.parse('https://pavilijoncoffee.com/api/to-go/orders?status=PAID'),
+      );
+      request.headers['Authorization'] = 'Bearer $token';
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode({'pin': pin});
+
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final List<dynamic> orders = data is List ? data : (data['data'] ?? []);
+
+        if (mounted) {
+          setState(() {
+            _todoList = orders.map((o) => o as Map<String, dynamic>).toList();
+            _doneList
+                .clear(); // Opsional: bersihkan completed item saat refresh
+          });
+        }
+      } else {
+        _showError('Gagal mengambil data: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showError('Terjadi kesalahan jaringan saat mengambil data');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  void _showError(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  Future<void> _logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+    if (mounted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (context) => const LoginScreen()),
+      );
+    }
+  }
+
+  void _markAsDone(Map<String, dynamic> item) {
+    setState(() {
+      _todoList.remove(item);
+      _doneList.add(item);
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Task berhasil diselesaikan!')),
+    );
+  }
+
+  Future<void> _syncDoneOrders() async {
+    if (_doneList.isEmpty) return;
+
+    setState(() {
+      _isSyncingDone = true;
+    });
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token') ?? '';
+
+      for (var item in _doneList) {
+        final id = item['id'];
+        if (id == null) continue;
+
+        try {
+          await http.patch(
+            Uri.parse(
+              'https://pavilijoncoffee.com/api/to-go/orders/$id/status',
+            ),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'status': 'COMPLETED'}),
+          );
+        } catch (innerE) {
+          debugPrint('Gagal sync item $id: $innerE');
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _doneList.clear();
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Semua pesanan telah diselesaikan ke server'),
+          ),
+        );
+      }
+    } catch (e) {
+      _showError('Terjadi kesalahan sinkronisasi data');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSyncingDone = false;
+        });
+      }
+    }
+  }
+
+  Widget _buildTaskCard(Map<String, dynamic> item, {required bool isDone}) {
+    final title =
+        item['orderHash']?.toString() ??
+        item['id']?.toString() ??
+        'Unknown Order';
+
+    // Cek format customer, bisa dari obyek {"customer": {"name": ...}} atau string langsung
+    String customerName = 'Customer';
+    if (item['customer'] is Map && item['customer']['name'] != null) {
+      customerName = item['customer']['name'].toString();
+    } else if (item['customerName'] != null) {
+      customerName = item['customerName'].toString();
+    } else if (item['customer_name'] != null) {
+      customerName = item['customer_name'].toString();
+    }
+
+    // Susun detail items Product
+    String itemsDetail = '';
+    if (item['items'] is List) {
+      final List<dynamic> itemsList = item['items'];
+      List<String> textItems = [];
+      for (var p in itemsList) {
+        if (p is Map) {
+          final qty = p['quantity']?.toString() ?? '1';
+          final name =
+              p['productName']?.toString() ?? p['name']?.toString() ?? 'Produk';
+          final variant = p['variantLabel']?.toString() ?? '';
+
+          if (variant.isNotEmpty) {
+            textItems.add('${qty}x $name ($variant)');
+          } else {
+            textItems.add('${qty}x $name');
+          }
+        }
+      }
+      itemsDetail = textItems.join(', ');
+    }
+
+    if (itemsDetail.isEmpty) {
+      itemsDetail = '0 items';
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: Colors.white,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.black.withOpacity(0.05)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Order #$title',
+                        style: TextStyle(
+                          fontFamily:
+                              'Manrope', // Sesuai dengan instruksi supaya menonjol
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800, // Extrabold
+                          color: const Color(0xFF2C2F30),
+                          decoration: isDone
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        customerName,
+                        style: const TextStyle(
+                          color: Color(0xFF595C5D),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (isDone)
+                  const Icon(Icons.check_circle, color: Colors.green, size: 28)
+                else
+                  IconButton(
+                    icon: const Icon(
+                      Icons.check_circle_outline,
+                      color: Color(0xFF005E9F),
+                      size: 28,
+                    ),
+                    onPressed: () => _markAsDone(item),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: const Color(0xFFF5F6F7),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                itemsDetail,
+                style: const TextStyle(
+                  color: Color(0xFF595C5D),
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Home Screen')),
-      body: const Center(child: Text('Welcome!')),
+      backgroundColor: const Color(0xFFF5F6F7), // Surface
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFF5F6F7), // Surface
+        elevation: 0,
+        title: const Text(
+          'Tasks',
+          style: TextStyle(
+            color: Color(0xFF595C5D),
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.2,
+          ),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(
+              Icons.sync,
+              color: Color(0xFF005E9F),
+            ), // Tombol ASK/Sync
+            onPressed: () {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Memanggil data API...')),
+              );
+              _fetchOrders();
+            },
+            tooltip: 'ASK Data',
+          ),
+          // Tombol Add "+" dihapus sesuai instruksi
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.redAccent),
+            onPressed: _logout,
+            tooltip: 'Logout',
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: _fetchOrders,
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 24.0,
+              vertical: 16.0,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // --- Judul Besar ---
+                const Text(
+                  'Pavilijon Coffee',
+                  style: TextStyle(
+                    fontSize: 34,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF2C2F30),
+                    letterSpacing: -0.5,
+                  ),
+                ),
+                // --- Nama User Opsional ---
+                if (_userName != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Welcome back, $_userName!',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      color: Color(0xFF595C5D),
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 32),
+
+                // --- Section To Do ---
+                const Text(
+                  'To Do',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF2C2F30),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (_isLoading)
+                  const Center(child: CircularProgressIndicator())
+                else if (_todoList.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16.0),
+                    child: Text(
+                      'Tidak ada task (To Do)',
+                      style: TextStyle(color: Color(0xFF595C5D)),
+                    ),
+                  )
+                else
+                  ..._todoList.map(
+                    (item) => _buildTaskCard(item, isDone: false),
+                  ),
+
+                const SizedBox(height: 48),
+
+                // --- Section Done ---
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Done',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF2C2F30),
+                      ),
+                    ),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(
+                          0xFF005E9F,
+                        ), // Menggunakan primary Tailwind (Biru)
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        minimumSize: const Size(60, 32),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
+                        ),
+                      ),
+                      onPressed: _isSyncingDone || _doneList.isEmpty
+                          ? null
+                          : _syncDoneOrders,
+                      child: _isSyncingDone
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Text(
+                              'DONE',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                if (_doneList.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16.0),
+                    child: Text(
+                      'Belum ada task yang diselesaikan',
+                      style: TextStyle(color: Color(0xFF595C5D)),
+                    ),
+                  )
+                else
+                  ..._doneList.map(
+                    (item) => _buildTaskCard(item, isDone: true),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
