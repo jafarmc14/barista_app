@@ -1,15 +1,17 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-void main() {
+Future<void> main() async {
+  await dotenv.load(fileName: ".env");
   runApp(const MyApp());
 }
 
 Future<Map<String, String>> getHeaders() async {
-  final prefs = await SharedPreferences.getInstance();
-  final storedToken = prefs.getString('auth_token') ?? '';
+  const storage = FlutterSecureStorage();
+  final storedToken = await storage.read(key: 'auth_token') ?? '';
   return {
     'Content-Type': 'application/json',
     'Authorization': 'Bearer $storedToken',
@@ -61,8 +63,9 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
+      final baseUrl = dotenv.env['API_BASE_URL'] ?? 'https://pavilijoncoffee.com/api';
       final response = await http.post(
-        Uri.parse('https://pavilijoncoffee.com/api/auth/login'),
+        Uri.parse('$baseUrl/auth/login'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'pin': pin}),
       );
@@ -72,14 +75,14 @@ class _LoginScreenState extends State<LoginScreen> {
         final token = data['token'];
 
         if (token != null) {
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('auth_token', token);
+          const storage = FlutterSecureStorage();
+          await storage.write(key: 'auth_token', value: token);
 
           final user = data['user'];
           if (user != null && user['name'] != null) {
-            await prefs.setString('user_name', user['name'].toString());
+            await storage.write(key: 'user_name', value: user['name'].toString());
           }
-          await prefs.setString('user_pin', pin);
+          await storage.write(key: 'user_pin', value: pin);
 
           if (mounted) {
             Navigator.pushReplacement(
@@ -305,10 +308,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadUserName() async {
-    final prefs = await SharedPreferences.getInstance();
+    const storage = FlutterSecureStorage();
+    final name = await storage.read(key: 'user_name');
     if (mounted) {
       setState(() {
-        _userName = prefs.getString('user_name');
+        _userName = name;
       });
     }
   }
@@ -318,14 +322,15 @@ class _HomeScreenState extends State<HomeScreen> {
       _isLoading = true;
     });
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token') ?? '';
-      final pin = prefs.getString('user_pin') ?? '';
+      const storage = FlutterSecureStorage();
+      final token = await storage.read(key: 'auth_token') ?? '';
+      final pin = await storage.read(key: 'user_pin') ?? '';
 
       // Menggunakan http.Request agar bisa mengirim body JSON pada method GET
+      final baseUrl = dotenv.env['API_BASE_URL'] ?? 'https://pavilijoncoffee.com/api';
       final request = http.Request(
         'GET',
-        Uri.parse('https://pavilijoncoffee.com/api/to-go/orders?status=PAID'),
+        Uri.parse('$baseUrl/to-go/orders?status=PAID'),
       );
       request.headers['Authorization'] = 'Bearer $token';
       request.headers['Content-Type'] = 'application/json';
@@ -368,8 +373,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
+    const storage = FlutterSecureStorage();
+    await storage.deleteAll();
     if (mounted) {
       Navigator.pushReplacement(
         context,
@@ -396,17 +401,18 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token') ?? '';
+      const storage = FlutterSecureStorage();
+      final token = await storage.read(key: 'auth_token') ?? '';
 
       for (var item in _doneList) {
         final id = item['id'];
         if (id == null) continue;
 
         try {
+          final baseUrl = dotenv.env['API_BASE_URL'] ?? 'https://pavilijoncoffee.com/api';
           await http.patch(
             Uri.parse(
-              'https://pavilijoncoffee.com/api/to-go/orders/$id/status',
+              '$baseUrl/to-go/orders/$id/status',
             ),
             headers: {
               'Authorization': 'Bearer $token',
@@ -454,6 +460,15 @@ class _HomeScreenState extends State<HomeScreen> {
       customerName = item['customerName'].toString();
     } else if (item['customer_name'] != null) {
       customerName = item['customer_name'].toString();
+    }
+
+    // Ambil note dari customer
+    String? customerNote;
+    if (item['customer'] is Map && item['customer']['note'] != null) {
+      final note = item['customer']['note'].toString().trim();
+      if (note.isNotEmpty) {
+        customerNote = note;
+      }
     }
 
     // Susun detail items Product
@@ -558,6 +573,41 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
+            // --- Note dari Customer ---
+            if (customerNote != null) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF8E1), // Kuning muda untuk highlight note
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFFFE082), width: 1),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.sticky_note_2_outlined,
+                      size: 16,
+                      color: Color(0xFFF9A825),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        customerNote,
+                        style: const TextStyle(
+                          color: Color(0xFF795548),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       ),
